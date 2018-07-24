@@ -8,3 +8,4 @@ sftp the file to the opsview server into the following location
 2. navigate to notification methods
 3. edit the slack notification methods
 4. type in the new script name in the command field
+5. reload opsview web via the roload button in the menu
