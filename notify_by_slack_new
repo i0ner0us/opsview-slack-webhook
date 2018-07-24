@@ -1,0 +1,189 @@
+#!/usr/bin/env perl
+# SYNTAX:
+my $usage = qq{
+   notify_by_slack
+   Copyright (C) 2003-2017 Opsview Limited. All rights reserved
+
+Usage: notify_by_hipchat [-h] [-n] [-d] [-m] [-c] [-a] 
+
+Where:
+  -h - this help text
+  -n - do not send acknowledgements
+  -d - Debug mode, allows you to enter the webhook and if you want the message.  
+  -m - Message to send, will override the Opsview notification data if specifed
+  -c - The channel that you want to send messages to. 
+  -a - The domain that you are using i.e opsview.slack.com, also provided by slack.  
+};
+
+# LICENSE:
+#   Copyright (C) 2003-2017 Opsview Limited. All rights reserved
+#
+#   This file is part of Opsview
+#
+
+use strict;
+use warnings;
+use lib qw( /usr/local/nagios/lib /usr/local/nagios/perl/lib );
+use Getopt::Long;
+use HTTP::Request;
+use JSON;
+use HTTP::Request::Common qw(POST);
+use Opsview::Config::Notifications;
+# Vars for message
+my $message     =   "";
+my $url         =   "";
+my $username    =   "Opsview";
+my $channel     =   "";
+my $domain      =   "";
+my $text		= 	"";
+
+my ($help_mode, $debug_mode, $no_ack);
+$debug_mode = $no_ack = $help_mode = 0;
+
+my $proxy       =    ''; 
+
+# Get the options
+GetOptions(
+    'h'     => \$help_mode,
+    'd'     => \$debug_mode,
+    'n'     => \$no_ack,
+    'm=s'   => \$message,
+    'u=s'   => \$url,
+    'c=s'   => \$channel,
+    'a=s'   => \$domain,
+);
+my $notification_vars =
+  Opsview::Config::Notifications->notification_variables(
+    'com.opsview.notificationmethods.slack'
+  );
+
+$url     = $notification_vars->{SLACK_WEBHOOK_URL};
+$channel = $notification_vars->{SLACK_CHANNEL};
+
+my $icon_to_show = "";
+my $emoji_icon = {
+    CRITICAL => ":exclamation:",
+    WARNING => ":warning:",
+    OK      => ":white_check_mark:",
+    UNKNOWN => ":question:",
+    RECOVERY => ":white_medium_square:",
+    OPERATIONAL => ":white_check_mark:",
+    IMPACTED    => ":warning:",
+    FAILED      => ":exclamation:",
+    DOWNTIME    => ":warning:",
+    OFFLINE     => ":exclamation:"
+};
+# Run the subroutines for the options. 
+if ($help_mode) {
+    # Help 
+    usage();
+    exit(0);
+} 
+else {
+    prepare_message(); 
+    send_slack_message();
+	# prepare_attachments();
+}
+
+# Takes command line arguments for the message details. 
+sub prepare_message {
+    
+    # BSM. 
+    if ( $ENV{OPSVIEW_NAME} ) {
+        $message =  $ENV{OPSVIEW_OUTPUT};
+        # OPSVIEW_STATE - current state of the BSM object. One of OPERATIONAL, IMPACTED, FAILED, OFFLINE, DOWNTIME
+        $icon_to_show = $emoji_icon->{$ENV{OPSVIEW_STATE}};
+    # Everything else
+    } elsif ( $ENV{NAGIOS_HOSTNAME} ) { 
+        # Problem
+        if ( $no_ack && $ENV{NAGIOS_NOTIFICATIONTYPE} eq 'ACKNOWLEDGEMENT' ) {
+            print 'Not sending acknowledgement', $/;
+            exit 0; }
+        # Service is OK
+        if ( $ENV{NAGIOS_SERVICEDESC} && $ENV{NAGIOS_NOTIFICATIONTYPE} eq 'RECOVERY') {
+		    $text = "$ENV{NAGIOS_NOTIFICATIONTYPE}: $ENV{NAGIOS_HOSTNAME}> \n\n*$ENV{NAGIOS_SERVICEDESC}* is $ENV{NAGIOS_SERVICESTATE}: ```$ENV{NAGIOS_SERVICEOUTPUT}```"; # ($ENV{NAGIOS_SHORTDATETIME})";
+		    $message = [{text => $text,color => '#36a64f',}];
+                $icon_to_show = $emoji_icon->{$ENV{NAGIOS_SERVICESTATE}};
+        } elsif ( $ENV{NAGIOS_SERVICEDESC} && $ENV{NAGIOS_NOTIFICATIONTYPE} eq 'PROBLEM') {
+			$text = "$ENV{NAGIOS_NOTIFICATIONTYPE}: $ENV{NAGIOS_HOSTNAME}> \n\n*$ENV{NAGIOS_SERVICEDESC}* is $ENV{NAGIOS_SERVICESTATE}: ```$ENV{NAGIOS_SERVICEOUTPUT}```"; # ($ENV{NAGIOS_SHORTDATETIME})";
+			$message = [{text => $text,color => '#ff0000',}];
+				$icon_to_show = $emoji_icon->{$ENV{NAGIOS_SERVICESTATE}}f;
+        } elsif ( $ENV{NAGIOS_SERVICEDESC} ) {
+			$text = "$ENV{NAGIOS_NOTIFICATIONTYPE}: $ENV{NAGIOS_HOSTNAME}> \n\n*$ENV{NAGIOS_SERVICEDESC}* is $ENV{NAGIOS_SERVICESTATE}: ```$ENV{NAGIOS_SERVICEOUTPUT}```"; # ($ENV{NAGIOS_SHORTDATETIME})";
+			$message = [{text => $text,}];
+				$icon_to_show = $emoji_icon->{$ENV{NAGIOS_SERVICESTATE}};
+        } else {
+        # Host
+	        $text = "$ENV{NAGIOS_NOTIFICATIONTYPE}: $ENV{NAGIOS_HOSTNAME}> \n\n*$ENV{NAGIOS_HOSTNAME}* is $ENV{NAGIOS_HOSTSTATE}: ```$ENV{NAGIOS_HOSTOUTPUT}```"; # ($ENV{NAGIOS_SHORTDATETIME})";
+            $message = [{text => $text,}];     
+		        $icon_to_show = $emoji_icon->{$ENV{NAGIOS_HOSTSTATE}};
+      }
+    } else {
+       die "No Opsview or Nagios environment variables set";
+           exit 1;
+    }
+}
+
+sub send_slack_message {
+    require LWP::UserAgent; 
+
+    my $payload = {
+           username => $username,
+           icon_emoji => $icon_to_show,
+		       attachments => $message,
+        };
+    $payload->{channel} = $channel if defined $notification_vars->{SLACK_CHANNEL};
+
+    my $req = POST($url , ['payload' => encode_json($payload)]);
+    
+    my $ua = LWP::UserAgent->new;
+    $ua->timeout(5);
+
+    my $res = $ua->request($req);
+    
+    my $err_line = $res->is_success ? '' : $res->status_line;
+    my $err_message = '';
+    if ($err_line) {
+        my $json = decode_json( $res->content );
+        $err_message = $json->{error}{message};
+    }
+
+    if ($debug_mode) {
+        $err_line
+          ? print "Message not sent: $err_line: $err_message\n"
+          : print "Message sent\n";
+    }
+
+    if (
+        (
+               $debug_mode
+            or $err_line
+        )
+        and open my $fh,
+        '>>',
+        '/usr/local/nagios/var/log/notify_by_hipchat.log'
+      )
+    {
+        my @t = localtime;
+        my $time = sprintf '%d-%02d-%02d %02d:%02d:%02d', 1900 + $t[5],
+          1 + $t[4], $t[3], $t[2], $t[1], $t[0];
+        if ( not $err_line ) {
+            print $fh "$time ${\( $res->code )} $message\n";
+        }
+        else {
+            print $fh
+              "$time ${\( $res->code )} $message\n  $err_line: $err_message\n";
+        }
+    }
+
+	exit !$res->is_success;
+
+}
+
+sub usage {
+    if ( $_ = shift ) { print "Error: $_\n" }
+    print $usage;
+    exit 1;
+}
+
+
